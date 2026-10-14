@@ -157,6 +157,9 @@ enum FontText {
     Simple(Box<Metrics>),
     /// A composite font with a predefined Unicode CMap.
     Unicode(UnicodeCMap),
+    /// The embedded Inter stand-in (`/DR /Font /PCUni`, see [`crate::UNICODE_FONT`]) for text the
+    /// form's font and Helvetica can't hold: Vietnamese, Central European, Greek, Cyrillic.
+    Inter(Box<Metrics>),
 }
 
 impl FontText {
@@ -166,12 +169,14 @@ impl FontText {
             // Selection checks every displayed string first; wrapping only removes line breaks.
             Self::Simple(metrics) => metrics.encode(&s.replace('\t', " ")).unwrap_or_default(),
             Self::Unicode(cmap) => cmap.encode(s),
+            Self::Inter(metrics) => metrics.encode(&pdfcraft_fonts::compose_vietnamese(&s.replace('\t', " "))).unwrap_or_default(),
         }
     }
 
     fn can_encode(&self, s: &str) -> bool {
         match self {
             Self::Simple(metrics) => metrics.encode(&s.replace('\t', " ")).is_some(),
+            Self::Inter(metrics) => metrics.encode(&pdfcraft_fonts::compose_vietnamese(&s.replace('\t', " "))).is_some(),
             _ => true,
         }
     }
@@ -186,6 +191,10 @@ impl FontText {
                 s.chars().map(|c| if c == '\t' { ' ' } else { c }).find(|c| metrics.encode(c.encode_utf8(&mut [0; 4])).is_none())
             }
             Self::Unicode(cmap) => cmap.first_unencodable(s),
+            Self::Inter(metrics) => pdfcraft_fonts::compose_vietnamese(s)
+                .chars()
+                .map(|c| if c == '\t' { ' ' } else { c })
+                .find(|c| metrics.encode(c.encode_utf8(&mut [0; 4])).is_none()),
         }
     }
 
@@ -193,6 +202,10 @@ impl FontText {
         match self {
             Self::WinAnsi | Self::Simple(_) => helvetica_width(s, size),
             Self::Unicode(_) => cjk_width(s, size),
+            Self::Inter(metrics) => {
+                let bytes = metrics.encode(&pdfcraft_fonts::compose_vietnamese(s)).unwrap_or_default();
+                metrics.codes(&bytes).into_iter().map(|(c, _)| metrics.width(c)).sum::<f64>() * size
+            }
         }
     }
 }
@@ -218,6 +231,17 @@ fn dr_font(doc: &Document, name: &str) -> Option<(Object, FontText)> {
         return None;
     }
     Some((entry, FontText::Simple(Box::new(Metrics::from_dict(doc, fd)))))
+}
+
+/// The embedded Inter stand-in the form's `/DR` holds as [`crate::UNICODE_FONT`], if any.
+fn inter_font(doc: &Document) -> Option<(Object, FontText)> {
+    let af = acroform(doc)?;
+    let dr = doc.resolve(af.get(b"DR")?);
+    let fonts = doc.resolve(dr.as_dict()?.get(b"Font")?);
+    let entry = fonts.as_dict()?.get(crate::UNICODE_FONT.as_bytes())?.clone();
+    let font = doc.resolve(&entry);
+    let fd = font.as_dict()?;
+    (fd.name(b"Subtype") == Some(b"Type0")).then(|| (entry.clone(), FontText::Inter(Box::new(Metrics::from_dict(doc, fd)))))
 }
 
 fn helvetica() -> Object {
@@ -456,7 +480,18 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
     };
     let (font_name, font_obj, enc) = match dr_font(doc, &da.font).filter(|(_, enc)| can_show(enc)) {
         Some((o, enc)) => (da.font.clone(), o, enc),
-        None => ("Helv".to_string(), helvetica(), FontText::WinAnsi),
+        None => match inter_font(doc).filter(|(_, enc)| {
+            // Helvetica writes what WinAnsi lacks as `?`; Inter takes over only then.
+            let helvetica_holds = if f.kind == FieldKind::List {
+                f.options.iter().all(|(_, d)| FontText::WinAnsi.first_unencodable(d).is_none())
+            } else {
+                FontText::WinAnsi.first_unencodable(&text.replace(['\n', '\r'], " ")).is_none()
+            };
+            !helvetica_holds && can_show(enc)
+        }) {
+            Some((o, enc)) => (crate::UNICODE_FONT.to_string(), o, enc),
+            None => ("Helv".to_string(), helvetica(), FontText::WinAnsi),
+        },
     };
     let width_of = |text: &str, size: f64| enc.width(text, size);
     let (mut c, bw) = frame(doc, &wd, width, height);

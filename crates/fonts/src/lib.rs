@@ -15,6 +15,10 @@ pub mod pdf;
 mod script;
 mod shaping;
 pub mod source_shaping;
+pub mod unicode;
+mod vi;
+
+pub use vi::compose_vietnamese;
 mod std14;
 mod std14_metrics;
 pub use craft::{
