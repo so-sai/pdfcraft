@@ -1288,6 +1288,13 @@ fn pages(ui: &mut egui::Ui, t: &Tokens, info: &DocInfo, view: &mut crate::DocVie
                     view.pending_action = Some(crate::canvas::ViewAction::Extract);
                     ui.close();
                 }
+                if ui.button(tl!("Split document…")).clicked() {
+                    if view.selected.is_empty() {
+                        view.select_pages(&[i]);
+                    }
+                    view.pending_action = Some(crate::canvas::ViewAction::SplitBeforeSelected);
+                    ui.close();
+                }
                 if ui.add_enabled(editable, egui::Button::new(tl!("Replace pages…"))).clicked() {
                     view.pending_action = Some(crate::canvas::ViewAction::ReplacePages);
                     ui.close();
