@@ -2050,6 +2050,88 @@ fn split_before_selected_pages() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn split_from_organize_grid_context_menu() {
+    let dir = temp_path("split-org-ctx");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut h = organize(4);
+    h.state_mut().export_dir_override = Some(dir.to_string_lossy().into_owned());
+    h.get_by_label("Page 3").click_button(egui::PointerButton::Secondary);
+    h.run_steps(2);
+    h.get_all_by_label("Split document…").last().unwrap().click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, Some(pdfcraft_ui_egui::Dialog::Split));
+    assert_eq!(h.state().split_draft.mode, pdfcraft_ui_egui::SplitMode::Selection);
+    h.get_by_label_contains("Creates 2 files from 4 pages");
+    h.get_all_by_label("Split").last().unwrap().click();
+    h.run_steps(3);
+    let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, ["doc (pages 1-2).pdf", "doc (pages 3-4).pdf"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn split_from_pages_panel_context_menu() {
+    let mut h = harness(4, |app| app.right = Some(pdfcraft_ui_egui::RightPanel::Pages));
+    let thumb = h.get_all_by_label("Page 3").max_by(|a, b| a.rect().left().total_cmp(&b.rect().left())).unwrap();
+    thumb.click_button(egui::PointerButton::Secondary);
+    h.run_steps(2);
+    h.get_all_by_label("Split document…").last().unwrap().click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, Some(pdfcraft_ui_egui::Dialog::Split));
+    assert_eq!(h.state().split_draft.mode, pdfcraft_ui_egui::SplitMode::Selection);
+    h.get_by_label_contains("Creates 2 files from 4 pages");
+}
+
+#[test]
+fn split_from_pages_panel_context_menu_on_current_page_without_selection() {
+    let mut h = harness(4, |app| app.right = Some(pdfcraft_ui_egui::RightPanel::Pages));
+    // Navigate to Page 2 (0-indexed 1) so it is current, but keep selected empty
+    h.state_mut().views[0].go_to_page(1);
+    h.state_mut().views[0].selected.clear();
+    h.run_steps(2);
+    assert_eq!(h.state().views[0].current, 1);
+    assert!(h.state().views[0].selected.is_empty());
+    let thumb = h.get_all_by_label("Page 2").max_by(|a, b| a.rect().left().total_cmp(&b.rect().left())).unwrap();
+    thumb.click_button(egui::PointerButton::Secondary);
+    h.run_steps(2);
+    h.get_all_by_label("Split document…").last().unwrap().click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, Some(pdfcraft_ui_egui::Dialog::Split));
+    assert_eq!(h.state().split_draft.mode, pdfcraft_ui_egui::SplitMode::Selection);
+    h.get_by_label_contains("Creates 2 files from 4 pages");
+}
+
+#[test]
+fn split_from_pages_panel_context_menu_on_page_one_falls_back_to_pages() {
+    let mut h = harness(4, |app| app.right = Some(pdfcraft_ui_egui::RightPanel::Pages));
+    let thumb = h.get_all_by_label("Page 1").max_by(|a, b| a.rect().left().total_cmp(&b.rect().left())).unwrap();
+    thumb.click_button(egui::PointerButton::Secondary);
+    h.run_steps(2);
+    h.get_all_by_label("Split document…").last().unwrap().click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, Some(pdfcraft_ui_egui::Dialog::Split));
+    assert_eq!(h.state().split_draft.mode, pdfcraft_ui_egui::SplitMode::Pages);
+}
+
+#[test]
+fn split_from_pages_panel_context_menu_with_multi_selection() {
+    let mut h = harness(4, |app| app.right = Some(pdfcraft_ui_egui::RightPanel::Pages));
+    // Select pages 2 and 4 (indices 1 and 3)
+    h.state_mut().views[0].select_pages(&[1, 3]);
+    h.run_steps(2);
+    let thumb = h.get_all_by_label("Page 2").max_by(|a, b| a.rect().left().total_cmp(&b.rect().left())).unwrap();
+    thumb.click_button(egui::PointerButton::Secondary);
+    h.run_steps(2);
+    h.get_all_by_label("Split document…").last().unwrap().click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, Some(pdfcraft_ui_egui::Dialog::Split));
+    assert_eq!(h.state().split_draft.mode, pdfcraft_ui_egui::SplitMode::Selection);
+    h.get_by_label_contains("Creates 3 files from 4 pages");
+}
+
 // ── Encrypted documents ───────────────────────────────────────────────────────────────────────
 
 fn protected(user: &str, owner: &str, permissions: i32) -> Vec<u8> {

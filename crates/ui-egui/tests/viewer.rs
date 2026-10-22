@@ -1390,7 +1390,7 @@ fn pages_panel_thumbnails_have_a_context_menu() {
     h.run_steps(2);
     // The page right-clicked becomes the selection the menu acts on.
     assert_eq!(h.state().views[0].target_pages(), vec![2]);
-    for item in ["Extract pages", "Cut", "Paste after"] {
+    for item in ["Extract pages", "Split document…", "Cut", "Paste after"] {
         h.get_by_label(item);
     }
     h.get_by_label("Copy").click();

@@ -635,6 +635,8 @@ pub enum ViewAction {
     Save,
     Extract,
     Split,
+    /// Split before each selected page: opens Split on that mode.
+    SplitBeforeSelected,
     /// Copy the selected pages (Cut also deletes them).
     CopyPages {
         cut: bool,
@@ -5173,6 +5175,10 @@ fn organize_grid(view: &mut DocView, info: &DocInfo, editable: bool, dirty: bool
                     }
                     if ui.button(tl!("Extract pages")).clicked() {
                         view.pending_action = Some(ViewAction::Extract);
+                        ui.close();
+                    }
+                    if ui.button(tl!("Split document…")).clicked() {
+                        view.pending_action = Some(ViewAction::SplitBeforeSelected);
                         ui.close();
                     }
                     if ui.add_enabled(editable, egui::Button::new(tl!("Replace pages…"))).clicked() {
