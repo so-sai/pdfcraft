@@ -7,7 +7,7 @@ This branch `local/vietnamese-annot` contains the local integration of **PR #206
 - **PR #2066 Source Commit**: `607b1161797ff00b3b7e546e1af51145bd2f60ff` (authored Oct 14, 2026).
 
 ## Scope & Implementation Details
-1. **Font Support**:
+1. **Font Support (PR #2066)**:
    - Embeds bundled `assets/fonts/Inter-Regular.ttf` (and `Inter-SemiBold.ttf`) as a Type0 CIDFont (`pdfcraft_fonts::unicode`) with `/ToUnicode` CMap.
    - Text stays completely **selectable and searchable** in all PDF viewers.
    - Automatically composes decomposed Vietnamese Unicode (NFD -> NFC) via `pdfcraft_fonts::compose_vietnamese` to ensure proper accent rendering without floating combining marks.
@@ -18,15 +18,17 @@ This branch `local/vietnamese-annot` contains the local integration of **PR #206
    - `doc_flatten` succeeds cleanly on annotated documents without any data-loss refusal.
 3. **Add Text & Form Fields**:
    - Add Text (`crates/edit/src/added.rs`) and AcroForm text fields (`crates/forms/src/appearance.rs`) also draw non-WinAnsi text using Inter stand-in.
+4. **Split Document from Thumbnail Context Menus (Commit `bf09cc13`)**:
+   - Adds "Split document…" button to both the left Pages panel thumbnail strip (`crates/ui-egui/src/panels.rs`) and the Organize grid (`crates/ui-egui/src/canvas.rs`).
+   - Introduces `ViewAction::SplitBeforeSelected` in `canvas.rs` and matches it in `editing.rs` to set `split_draft.mode = SplitMode::Selection`.
+   - Fixes edge case: when right-clicking the current page with an empty selection, `panels.rs` explicitly seeds `view.select_pages(&[i])` so the dialog defaults to `Selection` instead of unexpectedly falling back to `Pages`.
+   - Comprehensive test suite in `crates/ui-egui/tests/editing.rs` and `viewer.rs` covering all 4 edge cases with `egui_kittest` and `PointerButton::Secondary`.
 
 ## Verification Checklist Passed
 - [x] `cargo test -p pdfcraft-fonts` (79/79 passed)
 - [x] `cargo test -p pdfcraft-annot` (46/46 passed)
 - [x] `cargo test -p pdfcraft-forms` (124/124 passed)
-- [x] `cargo test -p pdfcraft-edit added_vietnamese` (1/1 passed)
-- [x] `pdfcraft-cli run` adding Vietnamese TextBox with technical symbols (`≥ 10mm ± 0.5mm, nhiệt độ 25°C, đường kính Ø100`):
-  - No warnings emitted.
-  - Appearance stream rendered with `/PCUni0`.
-  - `pdfcraft-cli text` extracts full text identically.
-  - `doc_flatten` succeeds with status `ok`.
-  - ASCII-only annotation regression: file size remains 1.6 KB with Helvetica.
+- [x] `cargo test -p pdfcraft-edit` (196/196 passed)
+- [x] `cargo test -p pdfcraft-ui-egui` (all 480 unit + 59 viewer + 148 editing passed)
+- [x] Mutation test on edge case: removing `view.select_pages(&[i])` causes `split_from_pages_panel_context_menu_on_current_page_without_selection` to fail with `left: Pages, right: Selection`, and restoring it passes.
+- [x] `pdfcraft-cli split "Hồ sơ nghiệm thu.pdf" --before 2`: splits 2-page document into 2 files preserving form fields and UTF-8 filenames.
