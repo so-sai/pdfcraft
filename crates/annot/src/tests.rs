@@ -2166,3 +2166,32 @@ fn degenerate_and_absurd_leader_and_caption_values_do_not_panic() {
     assert!(long.contains(&format!("({}) Tj", "w".repeat(256))), "cut to 256");
     assert!(!long.contains(&"w".repeat(257)));
 }
+
+#[test]
+fn vietnamese_text_box_is_drawn_in_inter_not_question_marks() {
+    let mut doc = fixture();
+    let t = add_annotation(&mut doc, &new(0, Shape::TextBox { rect: [0.0, 0.0, 300.0, 100.0], font_size: 12.0 }), &meta("t")).unwrap();
+    set_contents(&mut doc, 0, t, "Đã duyệt – Nguyễn Văn Ánh", &meta("")).unwrap();
+    let doc = reopen(&doc);
+    let d = &list(&doc, 0)[t];
+    assert_eq!(text(d, b"Contents"), "Đã duyệt – Nguyễn Văn Ánh");
+    assert!(pdfcraft_fonts::undrawn_mark(d).is_none(), "not marked as drawn with ?");
+    let n = d.get(b"AP").unwrap().as_dict().unwrap().reference(b"N").unwrap();
+    let Object::Stream(s) = &*doc.get(n) else { panic!() };
+    let raw = String::from_utf8_lossy(&s.decoded().unwrap()).into_owned();
+    assert!(raw.contains("/PCUni0 12 Tf") && !raw.contains('?'), "{raw}");
+    // The appearance's font is the embedded Type0 Inter, and it decodes back to the text.
+    let res = doc.resolve(s.dict.get(b"Resources").unwrap());
+    let fonts = doc.resolve(res.as_dict().unwrap().get(b"Font").unwrap());
+    let font = doc.resolve(fonts.as_dict().unwrap().get(b"PCUni0").unwrap());
+    let font = font.as_dict().unwrap().clone();
+    assert_eq!(font.name(b"Subtype"), Some(&b"Type0"[..]));
+    let m = pdfcraft_fonts::pdf::Metrics::from_dict(&doc, &font);
+    let hex: String = raw.split('<').skip(1).filter_map(|p| p.split('>').next()).collect::<Vec<_>>().join("");
+    let bytes: Vec<u8> = (0..hex.len()).step_by(2).filter_map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()).collect();
+    assert_eq!(m.decode(&bytes).replace(' ', ""), "Đã duyệt – Nguyễn Văn Ánh".replace(' ', ""));
+    // Restyling redraws it the same way.
+    let mut doc = doc;
+    set_style(&mut doc, 0, t, StyleChange::new(Some([1.0, 0.0, 0.0]), None, None, None), &meta("")).unwrap();
+    assert!(pdfcraft_fonts::undrawn_mark(&list(&doc, 0)[t]).is_none());
+}

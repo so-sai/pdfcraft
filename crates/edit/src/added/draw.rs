@@ -1,5 +1,6 @@
 use super::layout::{
-    Piece, arabic_error, hebrew_error, is_arabic, is_hebrew, is_thai, latin_width, lines, norm, shaped_layout, text_rect, thai_error, wrapped,
+    Piece, arabic_error, hebrew_error, is_arabic, is_hebrew, is_thai, latin_width, lines, norm, shaped_layout, text_rect, thai_error, unicode_text,
+    wrapped,
 };
 use super::types::{AddedText, Align, Family};
 use super::{
@@ -280,16 +281,28 @@ pub(super) fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict
                 out.extend_from_slice(b"Q\n");
                 return Ok((out, res));
             }
+            // Vietnamese and other text WinAnsi can't encode: Inter, embedded (italic is slanted).
+            let inter = if unicode_text(t) {
+                let e = pdfcraft_fonts::unicode::Embedded::new(doc, taken, "PCUni", t.bold).map_err(EditError::Invalid)?;
+                fonts.set(e.resource.clone().into_bytes(), e.font.clone());
+                Some(e)
+            } else {
+                None
+            };
             res.set(b"Font".to_vec(), Object::Dict(fonts));
             let r = text_rect(t);
             let [cr, cg, cb] = t.color.map(|v| v.clamp(0.0, 1.0));
-            out.extend(format!("BT /{name} {} Tf {} {} {} rg\n", n(t.size), n(cr), n(cg), n(cb)).bytes());
+            let shown_name = inter.as_ref().map_or(name.as_str(), |e| e.resource.as_str());
+            out.extend(format!("BT /{shown_name} {} Tf {} {} {} rg\n", n(t.size), n(cr), n(cg), n(cb)).bytes());
             if t.char_spacing != 0.0 {
                 out.extend(format!("{} Tc\n", n(t.char_spacing)).bytes());
             }
             let all = lines(t);
             for (i, line) in all.iter().enumerate() {
-                let w = latin_width(t, line);
+                let w = match &inter {
+                    Some(e) => e.width(line, t.size) + t.char_spacing * line.chars().count() as f64,
+                    None => latin_width(t, line),
+                };
                 let x = match t.align {
                     Align::Left | Align::Justify => r[0],
                     Align::Center => r[0] + ((r[2] - r[0]) - w) / 2.0,
@@ -302,7 +315,10 @@ pub(super) fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict
                 let tw =
                     if t.align == Align::Justify && i + 1 < all.len() && spaces > 0 { ((r[2] - r[0]) - w).max(0.0) / spaces as f64 } else { 0.0 };
                 out.extend(format!("1 0 0 1 {} {} Tm {} Tw ", n(x), n(y), n(tw)).bytes());
-                out.extend(literal(&win_ansi(line)));
+                match &inter {
+                    Some(e) => out.extend(e.show(line).unwrap_or_else(|| b"<>".to_vec())),
+                    None => out.extend(literal(&win_ansi(line))),
+                }
                 out.extend_from_slice(b" Tj\n");
             }
             out.extend_from_slice(b"ET\n");

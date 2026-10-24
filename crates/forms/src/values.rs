@@ -425,6 +425,8 @@ fn redraw(doc: &mut Document, f: &Field, values: &[String], scripts: &mut dyn Sc
         _ => None,
     };
     let in_place = f.kind == FieldKind::Text && f.has(flags::PASSWORD);
+    let texts: Vec<&str> = values.iter().map(String::as_str).chain(shown.as_deref()).chain(f.options.iter().map(|(_, d)| d.as_str())).collect();
+    appearance::ensure_unicode_font(doc, &texts)?;
     let mut undrawn = false;
     for w in &f.widgets {
         let (stream, missing) = match &shown {

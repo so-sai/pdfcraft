@@ -14,6 +14,20 @@ use pdfcraft_cos::{Dict, Object, PdfString, Stream};
 use pdfcraft_fonts::{first_undrawable, literal, win_ansi};
 pub use pdfcraft_fonts::{helvetica_width as text_width, wrap};
 
+/// A font for comment text the standard fonts can't encode (Vietnamese, Central European, Greek,
+/// Cyrillic): Inter embedded in the document by the caller ([`crate::set_appearance`]), which
+/// [`build_with`] draws a text box's text with instead of Helvetica.
+pub struct UnicodeFont<'a> {
+    /// The font's resource name in the appearance.
+    pub resource: &'a str,
+    /// The font object (a reference to the embedded Type0 font).
+    pub font: Object,
+    /// The string operand showing a line (`None` if the font lacks a character).
+    pub show: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+    /// The width of a line at a size.
+    pub width: &'a dyn Fn(&str, f64) -> f64,
+}
+
 use crate::{NOTE_SIZE, Rgb, n};
 
 mod symbols;
@@ -313,7 +327,7 @@ fn text_turn(d: &Dict) -> i64 {
 pub fn undrawable_text(d: &Dict) -> Option<(&'static str, char)> {
     let text = |key: &[u8]| d.get(key).and_then(Object::as_string).map(PdfString::to_text);
     let (what, text) = match d.name(b"Subtype")? {
-        b"FreeText" => ("the comment's text", text(b"Contents")?),
+        b"FreeText" => ("the comment's text", text(b"Contents").filter(|t| !pdfcraft_fonts::unicode::covers(t))?),
         b"Line" if !d.contains(b"PCMeasureValue") => ("the line's caption", line_caption(d)?),
         b"Line" | b"PolyLine" | b"Polygon" => ("the measurement label", text(b"PCMeasureValue")?),
         b"Stamp" if matches!(d.get(b"PCStamp"), Some(Object::Bool(true))) => ("the stamp's \"By\" line", text(b"PCByLine")?),
@@ -406,13 +420,18 @@ impl AppearanceDrawing {
 /// Text the standard fonts can't draw comes out as `?`: [`undrawable_text`] says which, and
 /// [`crate::set_appearance`] marks the annotation with it (`pdfcraft_fonts::UNDRAWN_MARK`).
 pub fn build(d: &Dict) -> Option<Stream> {
+    build_with(d, None)
+}
+
+/// [`build`], drawing a text box's text with `unicode` when the standard fonts can't encode it.
+pub fn build_with(d: &Dict, unicode: Option<&UnicodeFont<'_>>) -> Option<Stream> {
     let context = appearance_context(d)?;
     let drawing = AppearanceDrawing::new(&context);
     match context.subtype {
         b"Text" => return draw_icon(&context, "Note", [1.0, 0.82, 0.0], drawing),
         b"FileAttachment" => return draw_icon(&context, "PushPin", [0.0, 0.47, 0.84], drawing),
         b"Stamp" => return draw_stamp(&context, drawing),
-        b"FreeText" => return draw_free_text(&context, drawing),
+        b"FreeText" => return draw_free_text(&context, drawing, unicode),
         _ => {}
     }
     let mut drawing = drawing;
@@ -889,7 +908,7 @@ fn draw_stamp(context: &AppearanceContext<'_>, mut drawing: AppearanceDrawing) -
     Some(form(rect, c.as_bytes(), res))
 }
 
-fn draw_free_text(context: &AppearanceContext<'_>, mut drawing: AppearanceDrawing) -> Option<Stream> {
+fn draw_free_text(context: &AppearanceContext<'_>, mut drawing: AppearanceDrawing, unicode: Option<&UnicodeFont<'_>>) -> Option<Stream> {
     let d = context.dict;
     let rect = context.rect;
     let stroke = context.stroke;
@@ -961,11 +980,13 @@ fn draw_free_text(context: &AppearanceContext<'_>, mut drawing: AppearanceDrawin
         ));
     }
     let text = d.get(b"Contents").and_then(|o| o.as_string()).map(PdfString::to_text).unwrap_or_default();
+    let unicode = unicode.filter(|_| first_undrawable(&text).is_some());
+    let font_name = unicode.map_or("Helv", |u| u.resource);
     let pad = 2.0 + bw;
     let width = (rect[2] - rect[0] - 2.0 * pad).max(1.0);
     let q = d.int(b"Q").unwrap_or(0);
     c.push_str(&format!(
-        "{} {} {} {} re W n\nBT\n/Helv {} Tf\n{}",
+        "{} {} {} {} re W n\nBT\n/{font_name} {} Tf\n{}",
         n(rect[0]),
         n(rect[1]),
         n(rect[2] - rect[0]),
@@ -975,23 +996,39 @@ fn draw_free_text(context: &AppearanceContext<'_>, mut drawing: AppearanceDrawin
     ));
     let mut out = c.into_bytes();
     let mut y = rect[3] - pad - size * 0.9;
-    for line in wrap(&text, size, width) {
+    let lines = match unicode {
+        Some(u) => pdfcraft_fonts::wrap_with(&text, size, width, |s, sz| (u.width)(s, sz)),
+        None => wrap(&text, size, width),
+    };
+    for line in lines {
         if y < rect[1] - size {
             break;
         }
-        let lw = text_width(&line, size);
+        let lw = unicode.map_or_else(|| text_width(&line, size), |u| (u.width)(&line, size));
         let x = match q {
             1 => rect[0] + pad + (width - lw) / 2.0,
             2 => rect[2] - pad - lw,
             _ => rect[0] + pad,
         };
         out.extend(format!("1 0 0 1 {} {} Tm ", n(x), n(y)).bytes());
-        out.extend(literal(&win_ansi(&line)));
+        match unicode {
+            Some(u) => out.extend((u.show)(&line).unwrap_or_else(|| b"<>".to_vec())),
+            None => out.extend(literal(&win_ansi(&line))),
+        }
         out.extend_from_slice(b" Tj\n");
         y -= size * 1.2;
     }
     out.extend_from_slice(b"ET\n");
-    res.set(b"Font".to_vec(), helvetica_resource());
+    match unicode {
+        Some(u) => {
+            let mut fonts = Dict::new();
+            fonts.set(u.resource.as_bytes().to_vec(), u.font.clone());
+            res.set(b"Font".to_vec(), Object::Dict(fonts));
+        }
+        None => {
+            res.set(b"Font".to_vec(), helvetica_resource());
+        }
+    }
     let mut stream = form(full, &out, res);
     if let Some(m) = matrix {
         stream.dict.set(b"Matrix".to_vec(), Object::Array(m.iter().copied().map(Object::Real).collect()));

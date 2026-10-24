@@ -5356,3 +5356,42 @@ endstream".into(),
         assert!(f.value.iter().all(String::is_empty), "{kind:?}: reset leaves it off, not the parent's Yes: {:?}", f.value);
     }
 }
+
+/// Vietnamese typed into a Helvetica field is drawn with the embedded Inter stand-in, not `?`:
+/// nothing is marked, other viewers aren't asked to redraw, and the text reads back from the
+/// appearance.
+#[test]
+fn vietnamese_values_are_drawn_with_the_inter_stand_in() {
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /Annots [6 0 R 7 0 R] >>".into(),
+        "<< /Fields [6 0 R 7 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 5 0 R >> >> >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /DA (/Helv 10 Tf 0 g) /V (Ada) /Rect [50 700 300 715] /P 3 0 R >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (addr) /Ff 4096 /DA (/Helv 10 Tf 0 g) /Rect [50 600 300 660] /P 3 0 R >>".into(),
+    ];
+    let mut doc = document(&objs);
+    set_value(&mut doc, "name", &FieldValue::Text("Nguyễn Thị Ánh Tuyết".into())).unwrap();
+    set_value(&mut doc, "addr", &FieldValue::Text("Số 1 Đại Cồ Việt\nHai Bà Trưng, Hà Nội".into())).unwrap();
+    assert_eq!(field(&fields(&doc), "name").value, ["Nguyễn Thị Ánh Tuyết"]);
+    assert!(undrawn_fields(&doc).is_empty(), "nothing drawn as ?");
+    assert!(!need_appearances(&doc));
+    for name in ["name", "addr"] {
+        let all = fields(&doc);
+        let w = &field(&all, name).widgets[0];
+        let n = doc.get(w.obj).as_dict().unwrap().get(b"AP").unwrap().as_dict().unwrap().reference(b"N").unwrap();
+        let Object::Stream(s) = &*doc.get(n) else { panic!() };
+        let ap = String::from_utf8_lossy(&s.decoded().unwrap()).into_owned();
+        assert!(ap.contains("/PCUni 10 Tf"), "{ap}");
+    }
+    // One Inter in the form's resources, shared by both fields; ASCII values keep Helvetica.
+    set_value(&mut doc, "name", &FieldValue::Text("Ada".into())).unwrap();
+    let all = fields(&doc);
+    let w = &field(&all, "name").widgets[0];
+    let n = doc.get(w.obj).as_dict().unwrap().get(b"AP").unwrap().as_dict().unwrap().reference(b"N").unwrap();
+    let Object::Stream(s) = &*doc.get(n) else { panic!() };
+    assert!(String::from_utf8_lossy(&s.decoded().unwrap()).contains("(Ada) Tj"));
+    let programs = doc.scan_objects().filter(|(_, o)| matches!(o.as_ref(), Object::Stream(s) if s.dict.get(b"PCFullFont").is_some())).count();
+    assert_eq!(programs, 1);
+}

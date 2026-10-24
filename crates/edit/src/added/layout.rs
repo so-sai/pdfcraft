@@ -52,7 +52,16 @@ pub(super) fn wrapped(t: &AddedText) -> Vec<(String, bool)> {
         // sum of its words' and shaping stays linear in the paragraph's length. The space is the
         // paragraph's; a space between Latin words is drawn in the item's font, a few hundredths
         // of an em apart.
-        let measure = |s: &str| if rtl_script || thai { shaped_width(t, s, rtl) } else { latin_width(t, s) };
+        let inter = unicode_text(t);
+        let measure = |s: &str| {
+            if rtl_script || thai {
+                shaped_width(t, s, rtl)
+            } else if inter {
+                pdfcraft_fonts::unicode::width(s, t.size, t.bold) + t.char_spacing * s.chars().count() as f64
+            } else {
+                latin_width(t, s)
+            }
+        };
         let space = measure(" ");
         let (mut line, mut line_w) = (String::new(), 0.0);
         for word in para.split(' ') {
@@ -123,6 +132,9 @@ pub(super) fn is_hebrew(c: char) -> bool {
 /// draw (or that has no face to draw it). Page-content tools refuse such text; the Add-text editor
 /// keeps it open.
 pub fn first_undrawable(t: &AddedText) -> Option<char> {
+    if pdfcraft_fonts::unicode::covers(&t.text) {
+        return None;
+    }
     if t.text.chars().any(is_thai) {
         if let Some(c) = t.text.chars().find(|c| is_thai(*c) && !pdfcraft_fonts::thai_has(*c)) {
             return Some(c);
@@ -156,6 +168,10 @@ pub fn first_undrawable(t: &AddedText) -> Option<char> {
 fn shaped_by_a_face(t: &AddedText) -> bool {
     (pdfcraft_fonts::document_arabic_font().is_some() && t.text.chars().any(is_arabic))
         || (pdfcraft_fonts::document_hebrew_font(false).is_some() && t.text.chars().any(is_hebrew))
+}
+
+pub(super) fn unicode_text(t: &AddedText) -> bool {
+    pdfcraft_fonts::unicode::needed_for(&t.text)
 }
 
 /// An Arabic character the face shapes and draws (U+061C, a direction mark, is dropped).

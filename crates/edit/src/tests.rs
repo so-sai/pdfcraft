@@ -7557,3 +7557,39 @@ fn q_inside_a_text_object_restores_the_text_matrices() {
         assert_eq!((lines[0].text.as_str(), lines[0].baseline()), ("Edited", baseline), "{content} after editing");
     }
 }
+
+#[test]
+fn added_vietnamese_text_is_drawn_in_inter_and_stays_searchable() {
+    let mut doc = fixture();
+    let text = AddedText {
+        rect: [72.0, 600.0, 400.0, 700.0],
+        text: "Cộng hòa Xã hội Chủ nghĩa Việt Nam\nĐộc lập – Tự do".into(),
+        size: 14.0,
+        ..AddedText::default()
+    };
+    assert_eq!(first_undrawable(&text), None, "Vietnamese is no longer refused");
+    add_content(&mut doc, 0, &Content::Text(text.clone())).unwrap();
+    let doc2 = reopen(&doc);
+    let Content::Text(t) = &list_added(&doc2)[0].content else { panic!() };
+    assert_eq!(t.text, text.text, "the item keeps its text");
+    let page0 = streams(&doc2, 0).join("\n");
+    assert!(page0.contains("/PCUni0 14 Tf") && !page0.contains('?'), "{page0}");
+    // The page's text reads back as typed: copy and search work.
+    let read: String = text_lines(&doc2, 0).unwrap().iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n");
+    assert!(read.contains("Việt Nam") && read.contains("Độc lập"), "{read}");
+    // Decomposed input is composed, and retyping replaces the item's font instead of piling up.
+    let mut doc = doc2;
+    let retyped = AddedText { text: "Tie\u{0302}\u{0301}ng Vie\u{0323}\u{0302}t".into(), bold: true, italic: true, ..text };
+    update_content(&mut doc, 0, 0, &Content::Text(retyped)).unwrap();
+    let read: String = text_lines(&doc, 0).unwrap().iter().map(|l| l.text.clone()).collect();
+    assert!(read.contains("Tiếng Việt"), "{read}");
+    let p = &page_list(&doc)[0];
+    let res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap();
+    let fonts = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap();
+    assert_eq!(fonts.iter().filter(|(k, _)| k.starts_with(b"PCUni")).count(), 1, "the old Inter resource went with the old version");
+    delete_content(&mut doc, 0, 0).unwrap();
+    let p = &page_list(&doc)[0];
+    let res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap();
+    let fonts = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
+    assert!(!fonts.iter().any(|(k, _)| k.starts_with(b"PCUni")));
+}
