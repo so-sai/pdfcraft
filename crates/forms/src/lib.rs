@@ -1247,12 +1247,44 @@ pub(crate) fn merged_appearance(doc: &Document, widget: ObjRef, fresh: &Dict) ->
     apd
 }
 
+/// The `/DR` font name of the embedded Inter that draws field values the form's fonts and
+/// Helvetica can't hold (Vietnamese, Central European, Greek, Cyrillic).
+pub const UNICODE_FONT: &str = "PCUni";
+
+/// Put Inter in the form's default resources (`/DR /Font /PCUni`), embedded once, when a value
+/// needs it (`pdfcraft_fonts::unicode`). Field appearances then draw such values with it instead
+/// of `?`.
+fn ensure_unicode_font(doc: &mut Document, texts: &[&str]) -> Result<(), FormError> {
+    if !texts.iter().any(|t| pdfcraft_fonts::unicode::needed_for(&t.replace(['\n', '\r'], ""))) {
+        return Ok(());
+    }
+    let Some(root) = doc.root() else { return Ok(()) };
+    let entry = doc.get(root).as_dict().and_then(|c| c.get(b"AcroForm").cloned());
+    let Some(mut af) = acroform(doc) else { return Ok(()) };
+    let mut dr = af.get(b"DR").map(|o| doc.resolve(o)).and_then(|o| o.as_dict().cloned()).unwrap_or_default();
+    let mut fonts = dr.get(b"Font").map(|o| doc.resolve(o)).and_then(|o| o.as_dict().cloned()).unwrap_or_default();
+    if fonts.contains(UNICODE_FONT.as_bytes()) {
+        return Ok(());
+    }
+    let e = pdfcraft_fonts::unicode::Embedded::new(doc, &Dict::new(), UNICODE_FONT, false).map_err(FormError::Invalid)?;
+    fonts.set(UNICODE_FONT.as_bytes().to_vec(), e.font);
+    dr.set(b"Font".to_vec(), Object::Dict(fonts));
+    af.set(b"DR".to_vec(), Object::Dict(dr));
+    match entry {
+        Some(Object::Ref(r)) => doc.set(r, Object::Dict(af)),
+        _ => doc.update_dict(root, |c| c.set(b"AcroForm".to_vec(), Object::Dict(af)))?,
+    }
+    Ok(())
+}
+
 /// Regenerate the normal appearance of every widget of a text or choice field.
 fn redraw(doc: &mut Document, f: &Field, values: &[String], scripts: &mut dyn Scripts) -> Result<(), FormError> {
     let shown = match values {
         [one] if matches!(f.kind, FieldKind::Text | FieldKind::Combo) => scripting::formatted(doc, f, one, scripts),
         _ => None,
     };
+    let texts: Vec<&str> = values.iter().map(String::as_str).chain(shown.as_deref()).chain(f.options.iter().map(|(_, d)| d.as_str())).collect();
+    ensure_unicode_font(doc, &texts)?;
     let mut undrawn = false;
     for w in &f.widgets {
         let (stream, missing) = match &shown {

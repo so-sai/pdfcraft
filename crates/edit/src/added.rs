@@ -278,7 +278,16 @@ fn wrapped(t: &AddedText) -> Vec<(String, bool)> {
         // sum of its words' and shaping stays linear in the paragraph's length. The space is the
         // paragraph's; a space between Latin words is drawn in the item's font, a few hundredths
         // of an em apart.
-        let measure = |s: &str| if rtl_script || thai { shaped_width(t, s, rtl) } else { latin_width(t, s) };
+        let inter = unicode_text(t);
+        let measure = |s: &str| {
+            if rtl_script || thai {
+                shaped_width(t, s, rtl)
+            } else if inter {
+                pdfcraft_fonts::unicode::width(s, t.size, t.bold) + t.char_spacing * s.chars().count() as f64
+            } else {
+                latin_width(t, s)
+            }
+        };
         let space = measure(" ");
         let (mut line, mut line_w) = (String::new(), 0.0);
         for word in para.split(' ') {
@@ -328,6 +337,13 @@ fn thai_lines(t: &AddedText, para: &str, width: f64) -> Result<Vec<String>, Edit
     Ok(lines)
 }
 
+/// A text item drawn in Inter (`pdfcraft_fonts::unicode`): it has characters the standard fonts
+/// can't encode (Vietnamese, Central European, Greek, Cyrillic), all of which Inter draws, and no
+/// Arabic or Thai (those are shaped with their own faces).
+fn unicode_text(t: &AddedText) -> bool {
+    !t.text.chars().any(|c| is_arabic(c) || is_thai(c)) && pdfcraft_fonts::unicode::needed_for(&t.text.replace('\n', ""))
+}
+
 fn is_thai(c: char) -> bool {
     matches!(u32::from(c), 0x0E00..=0x0E7F)
 }
@@ -361,6 +377,9 @@ pub fn first_undrawable(t: &AddedText) -> Option<char> {
         t.text.chars().find(|c| (shaped_arabic(*c) && !pdfcraft_fonts::arabic_has(*c)) || (is_hebrew(*c) && !pdfcraft_fonts::hebrew_has(*c)))
     {
         return Some(c);
+    }
+    if unicode_text(t) {
+        return None;
     }
     if !shaped_by_a_face(t) {
         // Drawn line by line in the item's standard font (`\n` splits lines). Without the face
@@ -857,16 +876,28 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
                 out.extend_from_slice(b"Q\n");
                 return Ok((out, res));
             }
+            // Vietnamese and other text WinAnsi can't encode: Inter, embedded (italic is slanted).
+            let inter = if unicode_text(t) {
+                let e = pdfcraft_fonts::unicode::Embedded::new(doc, taken, "PCUni", t.bold).map_err(EditError::Invalid)?;
+                fonts.set(e.resource.clone().into_bytes(), e.font.clone());
+                Some(e)
+            } else {
+                None
+            };
             res.set(b"Font".to_vec(), Object::Dict(fonts));
             let r = text_rect(t);
             let [cr, cg, cb] = t.color.map(|v| v.clamp(0.0, 1.0));
-            out.extend(format!("BT /{name} {} Tf {} {} {} rg\n", n(t.size), n(cr), n(cg), n(cb)).bytes());
+            let shown_name = inter.as_ref().map_or(name.as_str(), |e| e.resource.as_str());
+            out.extend(format!("BT /{shown_name} {} Tf {} {} {} rg\n", n(t.size), n(cr), n(cg), n(cb)).bytes());
             if t.char_spacing != 0.0 {
                 out.extend(format!("{} Tc\n", n(t.char_spacing)).bytes());
             }
             let all = lines(t);
             for (i, line) in all.iter().enumerate() {
-                let w = latin_width(t, line);
+                let w = match &inter {
+                    Some(e) => e.width(line, t.size) + t.char_spacing * line.chars().count() as f64,
+                    None => latin_width(t, line),
+                };
                 let x = match t.align {
                     Align::Left | Align::Justify => r[0],
                     Align::Center => r[0] + ((r[2] - r[0]) - w) / 2.0,
@@ -878,8 +909,21 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
                 let spaces = line.matches(' ').count();
                 let tw =
                     if t.align == Align::Justify && i + 1 < all.len() && spaces > 0 { ((r[2] - r[0]) - w).max(0.0) / spaces as f64 } else { 0.0 };
-                out.extend(format!("1 0 0 1 {} {} Tm {} Tw ", n(x), n(y), n(tw)).bytes());
-                out.extend(literal(&win_ansi(line)));
+                match &inter {
+                    Some(e) => {
+                        // Two-byte codes: Tw (word spacing) only applies to the one-byte space, so
+                        // justified lines spread with Tc (character spacing) instead.
+                        let chars = line.chars().count().saturating_sub(1).max(1) as f64;
+                        let tc = if tw > 0.0 { tw * spaces as f64 / chars } else { 0.0 };
+                        let skew = if t.italic { 0.21 } else { 0.0 };
+                        out.extend(format!("1 0 {} 1 {} {} Tm {} Tc 0 Tw ", n(skew), n(x), n(y), n(tc)).bytes());
+                        out.extend(e.show(line).unwrap_or_else(|| b"<>".to_vec()));
+                    }
+                    None => {
+                        out.extend(format!("1 0 0 1 {} {} Tm {} Tw ", n(x), n(y), n(tw)).bytes());
+                        out.extend(literal(&win_ansi(line)));
+                    }
+                }
                 out.extend_from_slice(b" Tj\n");
             }
             out.extend_from_slice(b"ET\n");
@@ -1225,12 +1269,17 @@ pub fn delete_content(doc: &mut Document, page: usize, index: usize) -> Result<(
     Ok(())
 }
 
-/// The Type 3 fonts an Arabic item's stream shows text with. Each item has its own (`draw_shaped`
-/// names them so), so they go when the item is replaced or deleted.
+/// The fonts an item's stream shows text with that belong to it alone: the Type 3 fonts of Arabic
+/// and Thai text (`draw_shaped` names them so) and the Inter font of Vietnamese and other text
+/// WinAnsi can't encode (`PCUni…`). They go when the item is replaced or deleted.
 fn own_fonts(doc: &Document, obj: ObjRef) -> Vec<Vec<u8>> {
     let Object::Stream(s) = &*doc.get(obj) else { return Vec::new() };
     let Ok(data) = s.decoded() else { return Vec::new() };
-    data.split(u8::is_ascii_whitespace).filter_map(|w| w.strip_prefix(b"/")).filter(|w| w.starts_with(b"PCAr")).map(<[u8]>::to_vec).collect()
+    data.split(u8::is_ascii_whitespace)
+        .filter_map(|w| w.strip_prefix(b"/"))
+        .filter(|w| w.starts_with(b"PCAr") || w.starts_with(b"PCUni"))
+        .map(<[u8]>::to_vec)
+        .collect()
 }
 
 fn drop_fonts(doc: &Document, res: &mut Dict, names: &[Vec<u8>]) {
