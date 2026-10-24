@@ -2,7 +2,7 @@ use super::create::{finite, num_array};
 use super::lookup::{annot_dict, annots, page_refs};
 use super::modify::refuse_foreign_text;
 use super::types::NOTE_SIZE;
-use super::{AnnotError, Dict, Document, ObjRef, Object, Stream, appearance};
+use super::{AnnotError, Dict, Document, ObjRef, Object, PdfString, Stream, appearance};
 
 /// (Re)generate `/AP /N` for the annotation `r` from its dictionary, for an edit that keeps its
 /// text (a restyle, a new size or colour).
@@ -33,8 +33,30 @@ pub(crate) fn redraw_or_restore(doc: &mut Document, r: ObjRef, before: Dict) -> 
 pub(crate) fn draw_appearance(doc: &mut Document, r: ObjRef) -> Result<(), AnnotError> {
     let d = annot_dict(doc, r);
     let subtype = String::from_utf8_lossy(d.name(b"Subtype").unwrap_or_default()).into_owned();
-    let Some(stream) = build_appearance(doc, &d) else { return Err(AnnotError::Unsupported(subtype)) };
+    let stream = match unicode_appearance(doc, &d) {
+        Some(s) => Some(s),
+        None => build_appearance(doc, &d),
+    };
+    let Some(stream) = stream else { return Err(AnnotError::Unsupported(subtype)) };
     apply_appearance(doc, r, &d, stream)
+}
+
+/// A text box whose text the standard fonts can't encode but Inter can (Vietnamese, Central
+/// European, Greek, Cyrillic): its appearance drawn with Inter, embedded in the document
+/// (`pdfcraft_fonts::unicode`). `None` for anything else, which [`build_appearance`] draws.
+fn unicode_appearance(doc: &mut Document, d: &Dict) -> Option<Stream> {
+    if d.name(b"Subtype") != Some(b"FreeText") {
+        return None;
+    }
+    let text = d.get(b"Contents").and_then(Object::as_string).map(PdfString::to_text)?;
+    if !pdfcraft_fonts::unicode::needed_for(&text) {
+        return None;
+    }
+    let e = pdfcraft_fonts::unicode::Embedded::new(doc, &Dict::new(), "PCUni", false).ok()?;
+    let show = |s: &str| e.show(s);
+    let width = |s: &str, size: f64| e.width(s, size);
+    let font = appearance::UnicodeFont { resource: &e.resource, font: e.font.clone(), show: &show, width: &width };
+    appearance::build_with(d, Some(&font))
 }
 
 /// Draw the appearance for an annotation dictionary: the expensive half of [`set_appearance`].

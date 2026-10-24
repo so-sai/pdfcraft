@@ -19,6 +19,10 @@ use pdfcraft_cos::{DecodeBudget, Dict, Document, ObjRef, Object, PdfString};
 mod actions;
 pub mod af;
 pub mod appearance;
+
+/// The `/DR` font name of the embedded Inter that draws field values the form's fonts and
+/// Helvetica can't hold (Vietnamese, Central European, Greek, Cyrillic).
+pub const UNICODE_FONT: &str = "PCUni";
 mod author;
 mod calc_order;
 pub mod detect;
