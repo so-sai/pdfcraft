@@ -132,6 +132,11 @@ pub(super) fn is_hebrew(c: char) -> bool {
 /// draw (or that has no face to draw it). Page-content tools refuse such text; the Add-text editor
 /// keeps it open.
 pub fn first_undrawable(t: &AddedText) -> Option<char> {
+    // Added text splits lines on LF only, so a CR (CRLF included) stays in a line and would be
+    // drawn as `?`. `unicode::covers` deliberately ignores line breaks, so check this first.
+    if let Some(c) = t.text.chars().find(|c| *c == '\r') {
+        return Some(c);
+    }
     if pdfcraft_fonts::unicode::covers(&t.text) {
         return None;
     }
