@@ -181,12 +181,12 @@ pub fn add_watermark(doc: &mut Document, pages: &[usize], wm: &Watermark, replac
             check_on_top(doc, &all[i])?;
         }
     }
-    if replace {
-        remove_marks(doc, pages, MarkKind::Watermark)?;
-    }
     let opacity = wm.opacity.clamp(0.0, 1.0);
     let lines: Vec<&str> = text.lines().collect();
     let inter = if wm.needs_unicode() { Some(MarkFont::new(doc, lines.iter().copied())?) } else { None };
+    if replace {
+        remove_marks(doc, pages, MarkKind::Watermark)?;
+    }
     for &i in pages {
         let page = page_list(doc)[i].clone();
         let (w, h) = page.display_size(doc);
