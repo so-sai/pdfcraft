@@ -18,7 +18,7 @@ This branch `local/vietnamese-annot` contains the local integration of **PR #206
   - FreeText, TextBox, Callout, Add Text, and AcroForm text fields render Vietnamese without `/PCUndrawn` or `?`.
 
 ## Upstream Base
-- **Base commit**: `d3384340` (M7: make page-mark replacement transactional #5657 #5704, 2026-11-02).
+- **Base commit**: `3936f93a` (Release 0.18.0, 2026-11-03).
 - **PR #2066 Commit**: `457eaf27` (authored by BrianDo35, rebased onto `0cba87ae`).
 - **PR #5389 Commits**: Type 3 Header/Footer/Watermark support (`79881cce`, `8132b721`, `3114de08`).
 
