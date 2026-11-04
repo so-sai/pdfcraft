@@ -146,12 +146,15 @@ pub struct MonoSettings {
     pub target_ppi: f64,
     pub above_ppi: f64,
     pub compression: MonoCompression,
+    /// Binarize noisy near-bilevel scanned text to 1-bit CCITT Group 4 when dual-guard passes.
+    pub binarize_scans: bool,
 }
 
 impl MonoSettings {
     /// Reduce File Size and the presets: to 300 ppi above 450 ppi, CCITT Group 4. Text in a scan
     /// stays sharp at 300 ppi.
-    pub const REDUCE: MonoSettings = MonoSettings { downsample: true, target_ppi: 300.0, above_ppi: 450.0, compression: MonoCompression::CcittG4 };
+    pub const REDUCE: MonoSettings =
+        MonoSettings { downsample: true, target_ppi: 300.0, above_ppi: 450.0, compression: MonoCompression::CcittG4, binarize_scans: false };
 }
 
 /// Acrobat's JPEG quality steps.
@@ -201,6 +204,8 @@ pub struct Settings {
     pub remove_invalid_links: bool,
     /// Clean Up: remove named destinations nothing refers to.
     pub remove_unreferenced_dests: bool,
+    /// Convert DeviceCMYK images to DeviceRGB so they can be resampled and JPEG-recompressed.
+    pub convert_cmyk_to_rgb: bool,
 }
 
 impl Settings {
@@ -229,6 +234,7 @@ impl Default for Settings {
             lzw_to_flate: true,
             remove_invalid_links: true,
             remove_unreferenced_dests: true,
+            convert_cmyk_to_rgb: false,
         }
     }
 }

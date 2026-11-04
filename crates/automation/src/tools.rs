@@ -130,7 +130,8 @@ pub fn tools() -> Vec<ToolDef> {
                 "ppi": {"type":"number","minimum":9,"maximum":1600},
                 "quality": {"type":"integer","minimum":1,"maximum":100},
                 "dpi": {"type":"number","minimum":72,"maximum":600},
-                "language": {"type":"string"}, "skip_text_pages": {"type":"boolean"}
+                "language": {"type":"string"}, "skip_text_pages": {"type":"boolean"},
+                "convert_cmyk": {"type":"boolean"}, "binarize": {"type":"boolean"}
             }), &["paths","out_dir","steps"])),
         t("attachment_add", "Attach a file", "Attach the file at path to the document (document level, the Attachments panel; not a paper-clip comment on a page). name defaults to the file's name; the attachment's key, unique in the document, is returned. Undoable.")
             .cmd("edit.attach")

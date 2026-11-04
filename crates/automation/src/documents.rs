@@ -280,7 +280,7 @@ impl Automation {
 
     pub(crate) fn doc_optimize(&mut self, a: &Args) -> Result<Value> {
         use pdfcraft_engine::optimize::{Compatibility, Compression, ImageSettings, MonoCompression, Preset};
-        const MONO_KEYS: [&str; 4] = ["downsample", "ppi", "above_ppi", "compression"];
+        const MONO_KEYS: [&str; 5] = ["downsample", "ppi", "above_ppi", "compression", "binarize_scans"];
         let id = self.doc(a)?.id;
         let before = self.doc(a)?.bytes.len();
         let path = self.resolve(a.str("path")?, true)?;
@@ -331,6 +331,10 @@ impl Automation {
             if let Some(d) = mono.get("downsample") {
                 m.downsample = d.as_bool().ok_or_else(|| ToolError::InvalidArgs(format!("mono downsample must be true or false, not {d}")))?;
             }
+            if let Some(b) = mono.get("binarize_scans") {
+                m.binarize_scans =
+                    b.as_bool().ok_or_else(|| ToolError::InvalidArgs(format!("mono binarize_scans must be true or false, not {b}")))?;
+            }
             for (key, ppi) in [("ppi", &mut m.target_ppi), ("above_ppi", &mut m.above_ppi)] {
                 if let Some(p) = mono.get(key) {
                     *ppi = p
@@ -361,10 +365,18 @@ impl Automation {
             ("lzw_to_flate", &mut settings.lzw_to_flate),
             ("remove_invalid_links", &mut settings.remove_invalid_links),
             ("remove_unreferenced_dests", &mut settings.remove_unreferenced_dests),
+            ("convert_cmyk_to_rgb", &mut settings.convert_cmyk_to_rgb),
+            ("binarize_scans", &mut settings.mono.binarize_scans),
         ] {
             if let Some(b) = a.opt_bool(key)? {
                 *flag = b;
             }
+        }
+        if let Some(b) = a.opt_bool("convert_cmyk")? {
+            settings.convert_cmyk_to_rgb = b;
+        }
+        if let Some(b) = a.opt_bool("binarize")? {
+            settings.mono.binarize_scans = b;
         }
         let discard: Vec<pdfcraft_engine::Hidden> = match a.get("discard") {
             None => Vec::new(),

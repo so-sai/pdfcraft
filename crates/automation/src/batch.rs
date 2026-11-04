@@ -19,6 +19,7 @@ struct Recipe<'a> {
     images: optimize::ImageSettings,
     mono: optimize::MonoSettings,
     ocr: ocr::OcrSettings,
+    convert_cmyk: bool,
 }
 
 impl<'a> Recipe<'a> {
@@ -33,7 +34,8 @@ impl<'a> Recipe<'a> {
                 return Err(Args::wrong("steps", "unique convert/ocr/optimize steps, with convert first when present"));
             }
         }
-        for (keys, step) in [(&["ppi", "quality"][..], "optimize"), (&["dpi", "language", "skip_text_pages"][..], "ocr")] {
+        for (keys, step) in [(&["ppi", "quality", "binarize", "convert_cmyk"][..], "optimize"), (&["dpi", "language", "skip_text_pages"][..], "ocr")]
+        {
             if !steps.contains(&step) && keys.iter().any(|k| args.get(k).is_some()) {
                 return Err(failed(format!("{} settings need the {step} step", keys.join("/"))));
             }
@@ -57,10 +59,14 @@ impl<'a> Recipe<'a> {
             }
             images.compression = optimize::Compression::Jpeg(q as u8);
         }
+        if let Some(b) = args.opt_bool("binarize")? {
+            mono.binarize_scans = b;
+        }
+        let convert_cmyk = args.opt_bool("convert_cmyk")?.unwrap_or(false);
         if args.opt_num("dpi")?.is_some_and(|dpi| !(72.0..=600.0).contains(&dpi)) {
             return Err(Args::wrong("dpi", "72 to 600"));
         }
-        Ok(Self { steps, images, mono, ocr: auto.ocr_settings(args)? })
+        Ok(Self { steps, images, mono, ocr: auto.ocr_settings(args)?, convert_cmyk })
     }
 
     fn accepts(&self, path: &Path) -> bool {
@@ -94,7 +100,13 @@ impl<'a> Recipe<'a> {
                 }
                 "optimize" => {
                     let id = session.open(name, None, bytes.clone(), None).map_err(failed)?;
-                    let settings = optimize::Settings { color: self.images, gray: self.images, mono: self.mono, ..Default::default() };
+                    let settings = optimize::Settings {
+                        color: self.images,
+                        gray: self.images,
+                        mono: self.mono,
+                        convert_cmyk_to_rgb: self.convert_cmyk,
+                        ..Default::default()
+                    };
                     let (candidate, _) = session.optimized_bytes(id, &settings, &[])?;
                     session.close(id);
                     if candidate.len() < bytes.len() {

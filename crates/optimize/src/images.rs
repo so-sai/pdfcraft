@@ -785,6 +785,159 @@ fn process(
     (after < before).then_some((new, smask))
 }
 
+/// Convert a CMYK pixel slice to RGB using subtractive color mixing, applying /Decode array mapping if present.
+pub(crate) fn cmyk_to_rgb(cmyk: &[u8], decode: Option<[f32; 8]>) -> Vec<u8> {
+    let dec = decode.unwrap_or([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+    let mut rgb = Vec::with_capacity((cmyk.len() / 4) * 3);
+
+    for chunk in cmyk.as_chunks::<4>().0 {
+        let c = apply_decode(chunk[0], dec[0], dec[1]);
+        let m = apply_decode(chunk[1], dec[2], dec[3]);
+        let y = apply_decode(chunk[2], dec[4], dec[5]);
+        let k = apply_decode(chunk[3], dec[6], dec[7]);
+
+        let kf = 1.0 - k;
+        let r = (255.0 * (1.0 - c) * kf).round().clamp(0.0, 255.0) as u8;
+        let g = (255.0 * (1.0 - m) * kf).round().clamp(0.0, 255.0) as u8;
+        let b = (255.0 * (1.0 - y) * kf).round().clamp(0.0, 255.0) as u8;
+
+        rgb.push(r);
+        rgb.push(g);
+        rgb.push(b);
+    }
+    rgb
+}
+
+fn apply_decode(v: u8, dmin: f32, dmax: f32) -> f32 {
+    let t = f32::from(v) / 255.0;
+    (dmin + t * (dmax - dmin)).clamp(0.0, 1.0)
+}
+
+fn read_cmyk_decode(doc: &Document, decode_obj: Option<&Object>) -> Option<[f32; 8]> {
+    let resolved = doc.resolve(decode_obj?);
+    let a = resolved.as_array()?;
+    if a.len() != 8 {
+        return None;
+    }
+    let mut out = [0.0f32; 8];
+    for (i, item) in a.iter().enumerate() {
+        let val = doc.resolve(item).as_f64()?;
+        *out.get_mut(i)? = val as f32;
+    }
+    Some(out)
+}
+
+fn is_cmyk_space(doc: &Document, cs: &Object) -> bool {
+    let cs = doc.resolve(cs);
+    match &*cs {
+        Object::Name(n) => matches!(n.as_slice(), b"DeviceCMYK" | b"CMYK"),
+        Object::Array(a) => match family(doc, a).as_deref().and_then(Object::as_name) {
+            Some(b"ICCBased") => a.get(1).is_some_and(|icc| matches!(&*doc.resolve(icc), Object::Stream(s) if s.dict.int(b"N") == Some(4))),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn decode_cmyk_jpeg(data: &[u8], w: usize, h: usize) -> Option<Vec<u8>> {
+    use zune_jpeg::zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
+    let options = DecoderOptions::default().set_strict_mode(false).set_max_width(usize::from(u16::MAX)).set_max_height(usize::from(u16::MAX));
+    let mut dec = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(data), options);
+    dec.decode_headers().ok()?;
+    let input = dec.input_colorspace()?;
+    if !matches!(input, ColorSpace::CMYK | ColorSpace::YCCK) || dec.dimensions()? != (w, h) {
+        return None;
+    }
+    dec.set_options(options.jpeg_set_out_colorspace(input));
+    let mut px = dec.decode().ok()?;
+    if px.len() != w.checked_mul(h)?.checked_mul(4)? {
+        return None;
+    }
+    if input == ColorSpace::YCCK {
+        for p in px.as_chunks_mut::<4>().0 {
+            let (y, cb, cr) = (f32::from(p[0]), f32::from(p[1]) - 128.0, f32::from(p[2]) - 128.0);
+            let ink = |rgb: f32| (255.0 - rgb).round().clamp(0.0, 255.0) as u8;
+            p[0] = ink(y + 1.402 * cr);
+            p[1] = ink(y - 0.344_136 * cb - 0.714_136 * cr);
+            p[2] = ink(y + 1.772 * cb);
+        }
+    }
+    Some(px)
+}
+
+fn process_cmyk(
+    doc: &Document,
+    s: &Stream,
+    ppi: f64,
+    settings: &ImageSettings,
+    budget: &mut ImageBudget,
+) -> Option<(Stream, Option<(ObjRef, Stream)>)> {
+    let d = &s.dict;
+    let cs = d.get(b"ColorSpace")?;
+    if !is_cmyk_space(doc, cs)
+        || d.contains(b"Mask")
+        || d.name(b"ImageMask").is_some()
+        || matches!(d.get(b"ImageMask"), Some(Object::Bool(true)))
+        || d.int(b"BitsPerComponent") != Some(8)
+    {
+        return None;
+    }
+
+    let was_dct = is_dct(s)?;
+    let (w, h) = (u32::try_from(d.int(b"Width")?).ok()?, u32::try_from(d.int(b"Height")?).ok()?);
+    if w == 0 || h == 0 || (w as u64) * (h as u64) > MAX_PIXELS {
+        return None;
+    }
+
+    let wu = usize::try_from(w).ok()?;
+    let hu = usize::try_from(h).ok()?;
+    let bytes4 = wu.checked_mul(hu)?.checked_mul(4)?;
+
+    let cmyk_px = if was_dct {
+        if !budget.pay_jpeg(u64::try_from(bytes4).ok()?, &s.raw) {
+            return None;
+        }
+        let v = decode_cmyk_jpeg(&s.raw, wu, hu)?;
+        count_decoded(u64::from(w) * u64::from(h));
+        v
+    } else {
+        let v = budget.decode_filters(doc, s, allowance(bytes4, h)?).ok()?;
+        v.get(..bytes4)?.to_vec()
+    };
+
+    let decode_arr = read_cmyk_decode(doc, d.get(b"Decode"));
+    let rgb_px = cmyk_to_rgb(&cmyk_px, decode_arr);
+
+    let resize = settings.downsample && ppi.is_finite() && ppi > settings.above_ppi && settings.target_ppi > 0.0;
+    let (nw, nh) = if resize {
+        let k = settings.target_ppi / ppi;
+        (((f64::from(w) * k).round() as u32).max(1), ((f64::from(h) * k).round() as u32).max(1))
+    } else {
+        (w, h)
+    };
+
+    let resampled = if (nw, nh) != (w, h) { resample(&rgb_px, 3, w, h, nw, nh)? } else { rgb_px };
+
+    let q = match settings.compression {
+        Compression::Jpeg(q) => q,
+        _ => 80,
+    };
+    let data = jpeg(&resampled, 3, nw, nh, q)?;
+
+    let mut new_dict = d.clone();
+    for k in [&b"Filter"[..], b"DecodeParms", b"Decode", b"Length", b"DL"] {
+        new_dict.remove(k);
+    }
+    new_dict.set(b"Width".to_vec(), Object::Int(i64::from(nw)));
+    new_dict.set(b"Height".to_vec(), Object::Int(i64::from(nh)));
+    new_dict.set(b"BitsPerComponent".to_vec(), Object::Int(8));
+    new_dict.set(b"ColorSpace".to_vec(), Object::name("DeviceRGB"));
+    new_dict.set(b"Filter".to_vec(), Object::name("DCTDecode"));
+
+    let new_stream = Stream::from_raw(new_dict, data);
+    (new_stream.raw.len() < s.raw.len()).then_some((new_stream, None))
+}
+
 /// Whether colour space `cs` has one colour component, so a 1-bit image in it has one bit per
 /// pixel: grey, a separation, an indexed space or a DeviceN of one colourant. Of names, only
 /// DeviceGray counts, with `/G`, its abbreviation, which readers take as grey too: another name
@@ -825,7 +978,14 @@ type Pixel = fn(&[u8]) -> Option<bool>;
 ///   - an indexed image of 2, 4 or 8 bits that uses only palette entries 0 and 1, which stay 0 and
 ///     1 at one bit, whatever their colours, so the colour space stays. A decode array other than
 ///     the default stops it: in index units it would mean something else at one bit.
-fn one_bit(doc: &Document, s: &Stream, pack: bool, defaults: bool, budget: &mut ImageBudget) -> Option<(Vec<u8>, u32, u32, Option<Dict>)> {
+fn one_bit(
+    doc: &Document,
+    s: &Stream,
+    pack: bool,
+    defaults: bool,
+    binarize_scans: bool,
+    budget: &mut ImageBudget,
+) -> Option<(Vec<u8>, u32, u32, Option<Dict>)> {
     let d = &s.dict;
     // Through u32 first, as everywhere here, so the product can't overflow.
     let (w, h) = (u32::try_from(d.int(b"Width")?).ok()?, u32::try_from(d.int(b"Height")?).ok()?);
@@ -915,7 +1075,138 @@ fn one_bit(doc: &Document, s: &Stream, pack: bool, defaults: bool, budget: &mut 
     // Through its parameters given by reference too: without a PNG predictor's tag bytes taken
     // off, rows of 0 and 255 (or palette entries 0 and 1) would still pass below, each shifted.
     let samples = budget.decode_filters(doc, s, allowance(row_len.checked_mul(hu)?, h)?).ok()?;
-    Some((packed_rows(&samples, row_len, wu, hu, (n, bpc, white))?, w, h, Some(packed)))
+    let packed_data = packed_rows(&samples, row_len, wu, hu, (n, bpc, white))
+        .or_else(|| if binarize_scans && bpc == 8 { try_binarize_scan(&samples, row_len, wu, hu, n) } else { None })?;
+    Some((packed_data, w, h, Some(packed)))
+}
+
+/// Chroma threshold: maximum allowable difference between R, G, B for a non-background pixel.
+/// Colored seals (red ink) and signatures (blue ballpoint) have chromatic differences well above 15.
+const CHROMA_TOLERANCE: u8 = 10;
+
+/// Attempts to binarize an 8-bit image (1 or 3 channels) into 1-bit samples
+/// using Dual-Guard (Chroma Guard + Bimodal Histogram Guard) and Otsu thresholding.
+fn try_binarize_scan(samples: &[u8], row_len: usize, w: usize, h: usize, n: usize) -> Option<Vec<u8>> {
+    let total = w.checked_mul(h)?;
+    if total == 0 || (n != 1 && n != 3) {
+        return None;
+    }
+
+    let stride = w.div_ceil(8);
+    let out_len = stride.checked_mul(h)?;
+    if samples.len() < row_len.checked_mul(h)? {
+        return None;
+    }
+
+    // -------------------------------------------------------------
+    // GUARD 1: CHROMA GUARD (Only applies to RGB, n == 3)
+    // Inspects ink/content pixels (lum < 225) to avoid false rejections
+    // on slightly aged or yellowed scan paper.
+    // -------------------------------------------------------------
+    if n == 3 {
+        for row in samples.chunks(row_len).take(h) {
+            let row_pixels = row.get(..w.checked_mul(3)?)?;
+            for chunk in row_pixels.as_chunks::<3>().0 {
+                let (r, g, b) = (chunk[0], chunk[1], chunk[2]);
+                let lum = ((u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114) / 1000) as u8;
+                if lum < 225 {
+                    let max_c = r.max(g).max(b);
+                    let min_c = r.min(g).min(b);
+                    if max_c - min_c > CHROMA_TOLERANCE {
+                        // Color detail detected! Immediately reject to preserve JPEG colors.
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // GUARD 2: BIMODAL HISTOGRAM GUARD
+    // -------------------------------------------------------------
+    let mut hist = [0u32; 256];
+    let mut dark = 0usize;
+    let mut bright = 0usize;
+    let mut mid = 0usize;
+
+    for row in samples.chunks(row_len).take(h) {
+        let row_pixels = row.get(..w.checked_mul(n)?)?;
+        for chunk in row_pixels.chunks_exact(n) {
+            let lum =
+                if n == 1 { chunk[0] } else { ((u32::from(chunk[0]) * 299 + u32::from(chunk[1]) * 587 + u32::from(chunk[2]) * 114) / 1000) as u8 };
+            if let Some(entry) = hist.get_mut(usize::from(lum)) {
+                *entry += 1;
+            }
+            match lum {
+                0..=60 => dark += 1,
+                215..=255 => bright += 1,
+                81..=179 => mid += 1,
+                _ => {}
+            }
+        }
+    }
+
+    let extreme_ratio = (dark + bright) as f64 / total as f64;
+    let midtone_ratio = mid as f64 / total as f64;
+    let dark_ratio = dark as f64 / total as f64;
+
+    // Must be predominantly two-tone with minimal midtones, and contain actual dark content
+    if extreme_ratio < 0.92 || midtone_ratio > 0.012 || dark_ratio < 0.005 {
+        return None;
+    }
+
+    // -------------------------------------------------------------
+    // OTSU THRESHOLDING
+    // -------------------------------------------------------------
+    let threshold = compute_otsu(&hist, total).clamp(100, 180);
+
+    // -------------------------------------------------------------
+    // PACK 1-BIT (MSB first, 1 = white, 0 = black)
+    // -------------------------------------------------------------
+    let mut out = vec![0u8; out_len];
+    for (y, row) in samples.chunks(row_len).take(h).enumerate() {
+        let row_pixels = row.get(..w.checked_mul(n)?)?;
+        let out_row = out.get_mut(y * stride..(y + 1) * stride)?;
+        for (x, chunk) in row_pixels.chunks_exact(n).enumerate() {
+            let lum =
+                if n == 1 { chunk[0] } else { ((u32::from(chunk[0]) * 299 + u32::from(chunk[1]) * 587 + u32::from(chunk[2]) * 114) / 1000) as u8 };
+            if lum >= threshold {
+                *out_row.get_mut(x / 8)? |= 0x80 >> (x % 8);
+            }
+        }
+    }
+
+    Some(out)
+}
+
+fn compute_otsu(hist: &[u32; 256], total: usize) -> u8 {
+    let sum: f64 = hist.iter().enumerate().map(|(i, &c)| (i as f64) * (c as f64)).sum();
+    let mut wb = 0.0;
+    let mut sb = 0.0;
+    let mut max_variance = 0.0;
+    let mut best_t = 128u8;
+    let total_f = total as f64;
+
+    for (t, &count) in hist.iter().enumerate() {
+        wb += count as f64;
+        if wb == 0.0 {
+            continue;
+        }
+        let wf = total_f - wb;
+        if wf == 0.0 {
+            break;
+        }
+        sb += (t as f64) * (count as f64);
+        let mb = sb / wb;
+        let mf = (sum - sb) / wf;
+        let variance = wb * wf * (mb - mf) * (mb - mf);
+        if variance > max_variance {
+            max_variance = variance;
+            best_t = t as u8;
+        }
+    }
+
+    best_t
 }
 
 /// `h` rows of `w` pixels, each row `row_len` bytes of `n` samples a pixel at `bpc` bits (8, or
@@ -1134,7 +1425,7 @@ fn mono(doc: &Document, s: &Stream, ppi: f64, defaults: bool, settings: &MonoSet
     if only_to_resample && (!downsample || defaults || too_wide || settings.target_ppi >= ppi || (jbig2 && dark_is_one(doc, d).is_none())) {
         return None;
     }
-    let (data, w, h, packed) = one_bit(doc, s, !retain, defaults, budget)?;
+    let (data, w, h, packed) = one_bit(doc, s, !retain, defaults, settings.binarize_scans, budget)?;
     let packed_from_more = packed.is_some();
     let k = settings.target_ppi / ppi;
     // `downsample_bits` keeps a counter for each column: no more columns than a fax row may have,
@@ -1259,7 +1550,9 @@ pub(crate) fn run(
             continue;
         }
         let n = s.dict.get(b"ColorSpace").and_then(|cs| components(doc, cs));
-        let processed = n.and_then(|n| process(doc, s, ppi, if n == 1 { &settings.gray } else { &settings.color }, n, budget));
+        let processed = n
+            .and_then(|n| process(doc, s, ppi, if n == 1 { &settings.gray } else { &settings.color }, n, budget))
+            .or_else(|| if settings.convert_cmyk_to_rgb { process_cmyk(doc, s, ppi, &settings.color, budget) } else { None });
         // A dithered scan, say, downsampled and JPEG-compressed: the smaller wins, counting a soft
         // mask resampled with it.
         let smask_len = |smask: Option<&(ObjRef, Stream)>| match smask {
@@ -1926,5 +2219,150 @@ mod pack_tests {
         for (row_len, w, n, bpc) in [(1, 0, 1, 1), (1, 1, 0, 8), (1, 1, 1, 3), (1, 1, 2, 4), (1, 9, 1, 1), (1, usize::MAX / 8, 1, 1)] {
             assert_eq!(packed_rows(&samples, row_len, w, 4, (n, bpc, WHITE_IS_1)), None, "row of {row_len} for {w} × {n} × {bpc}");
         }
+    }
+}
+
+#[cfg(test)]
+mod binarize_tests {
+    use super::try_binarize_scan;
+
+    #[test]
+    fn chroma_guard_protects_red_seal_stamp() {
+        // A 100x100 RGB document, mostly white with black text, but has a red seal (chroma > 8)
+        let (w, h) = (100usize, 100usize);
+        let mut samples = vec![250u8; w * h * 3]; // white paper with slight scan noise
+
+        // Draw some black text (5% of page)
+        for i in 0..500 {
+            samples[i * 3] = 20;
+            samples[i * 3 + 1] = 20;
+            samples[i * 3 + 2] = 20;
+        }
+
+        // Add a red seal stamp pixel [220, 30, 30] (chroma diff = 190 > 8)
+        samples[800 * 3] = 220;
+        samples[800 * 3 + 1] = 30;
+        samples[800 * 3 + 2] = 30;
+
+        assert_eq!(try_binarize_scan(&samples, w * 3, w, h, 3), None, "Chroma guard must reject images with red seals");
+    }
+
+    #[test]
+    fn chroma_guard_protects_blue_pen_signature() {
+        let (w, h) = (100usize, 100usize);
+        let mut samples = vec![250u8; w * h * 3];
+
+        // Draw some black text
+        for i in 0..500 {
+            samples[i * 3] = 20;
+            samples[i * 3 + 1] = 20;
+            samples[i * 3 + 2] = 20;
+        }
+
+        // Add a light blue signature pixel [180, 185, 200] (diff = 20 > 8)
+        samples[600 * 3] = 180;
+        samples[600 * 3 + 1] = 185;
+        samples[600 * 3 + 2] = 200;
+
+        assert_eq!(try_binarize_scan(&samples, w * 3, w, h, 3), None, "Chroma guard must reject images with blue signatures");
+    }
+
+    #[test]
+    fn near_bilevel_scans_are_binarized_successfully() {
+        let (w, h) = (100usize, 100usize);
+        // 95% background near white (245), 5% text near black (25)
+        let mut samples = vec![245u8; w * h];
+
+        for s in samples.iter_mut().take(500) {
+            *s = 25;
+        }
+
+        let result = try_binarize_scan(&samples, w, w, h, 1);
+        assert!(result.is_some(), "Near-bilevel grayscale text scan must be binarized");
+        let packed = result.unwrap();
+        assert_eq!(packed.len(), w.div_ceil(8) * h);
+
+        // Verify that black text is bit 0 and white background is bit 1
+        // First pixel is black (25 < threshold) -> bit 7 of byte 0 should be 0
+        assert_eq!(packed[0] & 0x80, 0, "Dark text pixel must be 0");
+    }
+
+    #[test]
+    fn photos_with_midtones_are_rejected() {
+        let (w, h) = (100usize, 100usize);
+        // A gradient photo with lots of midtones (e.g. gray 120-150)
+        let mut samples = vec![130u8; w * h];
+        for s in samples.iter_mut().take(500) {
+            *s = 20;
+        }
+        for s in samples.iter_mut().take(1000).skip(500) {
+            *s = 240;
+        }
+
+        assert_eq!(try_binarize_scan(&samples, w, w, h, 1), None, "Images with substantial midtones must not be binarized");
+    }
+
+    #[test]
+    fn binarize_accepts_noisy_text_scan_with_yellowed_paper() {
+        let (w, h) = (300usize, 300usize);
+        let channels = 3usize;
+        let row_len = w * channels;
+
+        // Yellowed paper background: [250, 248, 238] (chroma diff = 12 > 10, but lum = 247 >= 225 so bypassed)
+        let mut samples = Vec::with_capacity(w * h * channels);
+        for i in 0..(w * h) {
+            let noise = (i % 5) as u8;
+            samples.push(250 - noise);
+            samples.push(248 - noise);
+            samples.push(238 - noise);
+        }
+
+        // Add dark text: [40, 38, 35] (lum ≈ 38 <= 60)
+        for y in 20..280 {
+            if y % 15 < 3 {
+                for x in 30..270 {
+                    let idx = (y * w + x) * channels;
+                    samples[idx] = 40;
+                    samples[idx + 1] = 38;
+                    samples[idx + 2] = 35;
+                }
+            }
+        }
+
+        let result = try_binarize_scan(&samples, row_len, w, h, channels);
+        assert!(result.is_some(), "Must accept noisy text scan with yellowed paper");
+        let packed = result.unwrap();
+        assert_eq!(packed.len(), w.div_ceil(8) * h);
+    }
+}
+
+#[cfg(test)]
+mod cmyk_tests {
+    use super::cmyk_to_rgb;
+
+    #[test]
+    fn cmyk_to_rgb_standard_colors() {
+        // [C, M, Y, K]
+        // White: 0 0 0 0 -> 255 255 255
+        assert_eq!(cmyk_to_rgb(&[0, 0, 0, 0], None), vec![255, 255, 255]);
+        // Black (pure K): 0 0 0 255 -> 0 0 0
+        assert_eq!(cmyk_to_rgb(&[0, 0, 0, 255], None), vec![0, 0, 0]);
+        // Cyan: 255 0 0 0 -> 0 255 255
+        assert_eq!(cmyk_to_rgb(&[255, 0, 0, 0], None), vec![0, 255, 255]);
+        // Magenta: 0 255 0 0 -> 255 0 255
+        assert_eq!(cmyk_to_rgb(&[0, 255, 0, 0], None), vec![255, 0, 255]);
+        // Yellow: 0 0 255 0 -> 255 255 0
+        assert_eq!(cmyk_to_rgb(&[0, 0, 255, 0], None), vec![255, 255, 0]);
+    }
+
+    #[test]
+    fn cmyk_to_rgb_with_inverted_decode() {
+        // Inverted decode array commonly produced by Adobe Photoshop/InDesign:
+        // [1 0 1 0 1 0 1 0]
+        let inverted_decode = Some([1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+        // Under inverted decode, 255 maps to 0 -> so [255, 255, 255, 255] maps to [0, 0, 0, 0] = White!
+        assert_eq!(cmyk_to_rgb(&[255, 255, 255, 255], inverted_decode), vec![255, 255, 255]);
+        // Under inverted decode, 0 maps to 255 -> so [0, 0, 0, 0] maps to [255, 255, 255, 255] = Black!
+        assert_eq!(cmyk_to_rgb(&[0, 0, 0, 0], inverted_decode), vec![0, 0, 0]);
     }
 }

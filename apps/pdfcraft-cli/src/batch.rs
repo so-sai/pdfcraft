@@ -15,6 +15,9 @@ const OPTIONS: &[OptionSpec] = &[
     OptionSpec { name: "--dpi", takes_value: true },
     OptionSpec { name: "--language", takes_value: true },
     OptionSpec { name: "--ocr-all-pages", takes_value: false },
+    OptionSpec { name: "--convert-cmyk", takes_value: false },
+    OptionSpec { name: "--binarize", takes_value: false },
+    OptionSpec { name: "--preset", takes_value: true },
 ];
 
 pub(super) fn run(args: &[String]) -> Result<(), CliError> {
@@ -52,6 +55,16 @@ pub(super) fn run(args: &[String]) -> Result<(), CliError> {
     }
     if seen.contains("--ocr-all-pages") {
         params["skip_text_pages"] = json!(false);
+    }
+    if seen.contains("--convert-cmyk") {
+        params["convert_cmyk"] = json!(true);
+    }
+    if seen.contains("--binarize") {
+        params["binarize"] = json!(true);
+    }
+    if matches!(flag(args, "--preset"), Some("email" | "screen")) {
+        params["convert_cmyk"] = json!(true);
+        params["binarize"] = json!(true);
     }
     let mut auto = automation(args)?;
     let content = auto.call("doc_batch", &params).map_err(|e| e.to_string())?;
