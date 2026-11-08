@@ -21,6 +21,9 @@ This branch `local/vietnamese-annot` contains the local integration of **PR #206
 - **Base commit**: `3936f93a` (Release 0.18.0, 2026-11-03).
 - **PR #2066 Commit**: `457eaf27` (authored by BrianDo35, rebased onto `0cba87ae`).
 - **PR #5389 Commits**: Type 3 Header/Footer/Watermark support (`79881cce`, `8132b721`, `3114de08`).
+- **Windows Print Crash Fix (#5006, upstream PR #6514)**:
+  - Bumps `craft-print` to `e6489d92` (`craft-libs#636`), `craft-winprint-gdi` to `64e7afd4`, and `winprint` to `03a4fb63` (`winprint.rs#15`).
+  - Eliminates Direct2D Access Violation (`0xc0000005` in `igd10iumd64.dll`) on Windows 11 by supplying multi-threaded `ID2D1Factory` for `Windows.Data.Pdf` and HP/network printer capabilities query.
 
 ## Verification Checklist Passed
 - [x] `git branch -r --contains 12b5e670` confirms PR #4211 is part of `origin/main`.
